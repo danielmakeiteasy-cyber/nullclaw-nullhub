@@ -1,0 +1,43 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "1545760817197911",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15556613638",
+              "phone_number_id": "1184022858132237"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Daniel Rangel"
+                },
+                "wa_id": "573202682664",
+                "user_id": "CO.1034205772440454",
+                "country_code": "CO"
+              }
+            ],
+            "messages": [
+              {
+                "from": "573202682664",
+                "from_user_id": "CO.1034205772440454",
+                "id": "wamid.test_quien_eres_002",
+                "timestamp": "1782860100",
+                "text": {
+                  "body": "¿Quién eres tú y para qué negocio trabajas?"
+                },
+                "from_logical_id": "261146930069609",
+                "type": "text"
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

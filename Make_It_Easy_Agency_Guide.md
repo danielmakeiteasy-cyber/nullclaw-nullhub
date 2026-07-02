@@ -462,3 +462,86 @@ docker run --rm -v /docker/agency/daniel:/nullclaw-data nullclaw:agency doctor
 ```
 
 
+---
+
+## 🎓 Lecciones Aprendidas — Canal WhatsApp con NullHub (Producción Junio 2026)
+
+> Estas lecciones vienen del despliegue real de **Valentina** para **Mariachi Pura Sangre** (Dallas, Texas). Aplican a cualquier bot de WhatsApp gestionado con NullHub nativo (sin Docker).
+
+### ⚠️ Los 5 Errores que Impiden que el Bot Responda
+
+| Error | Síntoma | Solución |
+|-------|---------|----------|
+| Modelo mal escrito (`gpt-4.1`) | Bot acepta mensajes pero nunca responde | Cambiar a `openai/gpt-4o-mini` en config.json |
+| `allowed_domains: []` vacío | Bot no puede llamar a n8n | Cambiar a `allowed_domains: ["*"]` |
+| `memory.db` contaminado | Bot ignora SOUL.md y responde genérico | Borrar memory.db y reiniciar |
+| Falta IDENTITY.md o SOUL.md | Bot responde como IA genérica | Ambos archivos deben existir en workspace |
+| Access token expirado (24h) | Bot responde en NullHub pero NO llega a WhatsApp | Generar nuevo token en Meta Developers |
+
+### 🔑 El Dilema del `app_secret`
+
+El `app_secret` controla quién puede enviarle mensajes al bot:
+
+- **Con `app_secret` configurado** → Meta (mensajes reales de WhatsApp) ✅ pasan. Scripts de prueba sin firma HMAC ❌ son rechazados.
+- **Con `app_secret` vacío `""`** → Scripts de prueba ✅ pasan. Mensajes reales de WhatsApp ❌ son rechazados.
+
+**Script PowerShell para pruebas con firma HMAC correcta** (funciona con `app_secret` activo):
+```powershell
+# test_webhook.ps1
+$secret = "TU_APP_SECRET_AQUI"
+$payload = Get-Content -Raw "test_webhook.json"
+$hmac = New-Object System.Security.Cryptography.HMACSHA256
+$hmac.Key = [Text.Encoding]::UTF8.GetBytes($secret)
+$hash = $hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($payload))
+$signature = "sha256=" + [BitConverter]::ToString($hash).Replace("-", "").ToLower()
+$headers = @{ "Content-Type" = "application/json"; "X-Hub-Signature-256" = $signature }
+Invoke-RestMethod -Uri "https://hub.tudominio.com/whatsapp" -Method Post -Headers $headers -Body $payload
+```
+
+### 📦 Subir SOUL.md e IDENTITY.md sin Errores de Caracteres
+
+**Método seguro con base64** (evita que los backticks y símbolos especiales rompan el heredoc):
+```powershell
+# En PowerShell local — convierte el archivo a base64:
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\ruta\SOUL.md'))
+```
+```bash
+# En el servidor VPS — decodifica y escribe:
+echo "BASE64_STRING" | base64 -d > /root/.nullhub/instances/nullclaw/INSTANCIA/workspace/SOUL.md
+echo "BASE64_STRING" | base64 -d > /root/.nullhub/instances/nullclaw/INSTANCIA/workspace/IDENTITY.md
+```
+
+Formato correcto del `IDENTITY.md` (con los 4 campos):
+```markdown
+- **Name:** Valentina
+- **Creature:** AI assistant
+- **Vibe:** warm, friendly, helpful
+- **Emoji:** 🎺
+```
+
+### 🔄 Cómo Reiniciar NullClaw (nullhub restart no implementado aún)
+
+```bash
+# Mata el proceso — NullHub lo levanta automáticamente en ~5 segundos
+pkill nullclaw
+
+# Verifica que volvió
+sleep 5 && pgrep -a nullclaw
+```
+
+### 🧹 Limpiar Memoria Contaminada (obligatorio al cambiar SOUL)
+
+```bash
+rm /root/.nullhub/instances/nullclaw/INSTANCIA/workspace/memory.db* && echo "OK"
+pkill nullclaw
+```
+
+### 🔍 Verificar el Estado Completo del Bot (comando de diagnóstico)
+
+```bash
+echo "=== ARCHIVOS ===" && ls -la /root/.nullhub/instances/nullclaw/INSTANCIA/workspace/
+echo "=== IDENTITY ===" && cat /root/.nullhub/instances/nullclaw/INSTANCIA/workspace/IDENTITY.md
+echo "=== SOUL (inicio) ===" && head -5 /root/.nullhub/instances/nullclaw/INSTANCIA/workspace/SOUL.md
+echo "=== PROCESO ===" && pgrep -a nullclaw
+```
+
