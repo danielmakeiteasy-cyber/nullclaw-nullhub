@@ -365,7 +365,7 @@ Pega este contenido completo (reemplaza `TU_API_KEY_OPENAI`, `TOKEN_BOT_TELEGRAM
         },
         "temperature": 0.5,
         "autonomy": {
-          "level": "full",
+          "level": "autonomous",
           "max_actions_per_hour": 120,
           "require_approval_for_medium_risk": false
         }
