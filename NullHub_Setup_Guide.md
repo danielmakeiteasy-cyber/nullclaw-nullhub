@@ -9,6 +9,11 @@ Todo corre de forma **nativa** (sin Docker Swarm) usando Nginx, PM2 y Systemd.
 > **Convención:** En esta guía verás `tudominio.com` como placeholder.
 > Reemplázalo por tu dominio real (ej: `makeiteasycol.com`) en TODOS los lugares donde aparezca.
 
+> **📚 Guías Complementarias (Creación de Agentes):**
+> Esta guía abarca la instalación del servidor. Una vez finalices, para crear bots SIEMPRE debes consultar:
+> - **📖 `deploy_guide.md` (El Paso a Paso Definitivo):** Te lleva de la mano desde que haces clic en "Instalar" en la interfaz web de NullHub, hasta que entras por consola a configurar el `config.json` (quitando el sandbox) y dándole la personalidad. Es tu manual operativo de batalla.
+> - **📄 `Plantilla_Cliente_Nullclaw.md`:** Esta la debes tener a la mano porque contiene la base exacta del archivo `config.json` y la estructura de carpetas (`IDENTITY.md`, `SOUL.md`). Te sirve para copiar y pegar sin tener que escribir el código desde cero.
+
 ---
 
 ## 🏗️ Arquitectura del Servidor
@@ -511,6 +516,14 @@ Los campos críticos del `config.json` que deben estar exactos:
       }
     }
   },
+  "autonomy": {
+    "level": "autonomous"
+  },
+  "security": {
+    "sandbox": {
+      "enabled": false
+    }
+  },
   "http_request": {
     "enabled": true,
     "allowed_domains": ["*"]
@@ -622,3 +635,297 @@ print('allowed_domains:', c['http_request']['allowed_domains'])
 # 5. Verificar que el proceso está activo
 pgrep -a nullclaw
 ```
+
+---
+
+## 🛡️ Prevención de Espacio en Disco: Rotación de Logs (Logrotate)
+
+Para evitar que los logs acumulados de los bots llenen el disco del VPS con el tiempo, configura esta regla de `logrotate`:
+
+```bash
+# Crear regla de logrotate para NullHub en el VPS (Paso recomendado de seguridad en Setup)
+cat << 'EOF' | sudo tee /etc/logrotate.d/nullhub
+/root/.nullhub/logs/*.log {
+    daily
+    rotate 7
+    size 50M
+    compress
+    missingok
+    notifempty
+}
+EOF
+```
+
+---
+
+## 🚀 GUÍA OPERATIVA: Crear un Nuevo Agente (Paso a Paso)
+
+> **¿Para qué sirve esta sección?** Una vez el servidor está instalado (pasos anteriores), sigue este flujo cada vez que quieras agregar un cliente nuevo. **Tiempo estimado: 20-30 minutos.**
+
+### PASO 0 — Conéctate al VPS por SSH
+
+```bash
+ssh root@IP_DEL_VPS
+```
+*(Usa la IP y contraseña de tu servidor Hostinger o el que tengas)*
+
+---
+
+### PASO 1 — Instalar el agente desde el panel de NullHub
+
+En tu navegador ve a `https://hub.tudominio.com` y:
+
+1. Clic en **INSTALL COMPONENT** → **NULLCLAW**
+2. Llena el formulario:
+
+| Campo | Valor |
+|---|---|
+| **Instance Name** | `<nombre-cliente>` (ej: `pizzeria-bot`) |
+| **OpenAI API Key** | *(tu API key de OpenAI)* |
+| **Telegram Bot Token** | `<TOKEN_DE_TELEGRAM>` *(obtenido desde @BotFather)* |
+| **Agent ID** | `agente-<nombre-cliente>` |
+| **Autonomy Level** | `FULL` |
+
+3. Clic en **INSTALL** → ✅ NullHub crea el agente automáticamente.
+
+---
+
+### PASO 2 — Editar el SOUL.md por SSH
+
+NullHub no tiene editor visual para el SOUL.md, así que se hace por SSH. Reemplaza los `<campos>` antes de ejecutar:
+
+```bash
+cat > ~/.nullhub/instances/nullclaw/<nombre-cliente>/workspace/SOUL.md << 'ENDOFFILE'
+# <NombreBot> — Instrucciones
+
+Eres <NombreBot>, el asistente virtual para <NombreEmpresa>.
+
+IMPORTANTE: Solo usuarios autorizados pueden interactuar. Especifica aquí qué usuarios o IDs de Telegram pueden darte órdenes.
+
+## REGLA ABSOLUTA
+
+Para consultar o enviar datos externos, DEBES usar http_request con estos parámetros exactos:
+
+- URL: <URL_DEL_WEBHOOK_O_API>
+- Método: POST
+- Headers: {"Content-Type": "application/json", "Authorization": "TuTokenAquiSiSePide"}
+
+NUNCA digas que no puedes hacer algo. SIEMPRE usa http_request.
+
+## Acciones disponibles
+
+- Consulta 1: {"action":"consulta_1"}
+- Consulta 2: {"action":"consulta_2","parametro":"valor"}
+- Crear/Enviar datos: ver flujo abajo
+
+## Flujo para recolección de datos
+
+Cuando te pidan crear un registro, pregunta paso a paso:
+1. ¿Dato 1?
+2. ¿Dato 2?
+3. ¿Dato 3?
+4. Muestra el resumen y pregunta: "¿Todo correcto? Responde SI para enviar."
+5. Si confirma, envía: {"action":"crear_registro", "dato1": "valor1", "dato2": "valor2"}
+
+## Formato de respuesta para Telegram
+
+- Siempre en español con emojis
+- Para listas usa guiones, no tablas
+- Si hay muchos resultados, muestra los 5 primeros
+ENDOFFILE
+```
+
+Verifica que quedó bien:
+```bash
+cat ~/.nullhub/instances/nullclaw/<nombre-cliente>/workspace/SOUL.md
+```
+
+---
+
+### PASO 3 — Crear el IDENTITY.md por SSH
+
+```bash
+cat > ~/.nullhub/instances/nullclaw/<nombre-cliente>/workspace/IDENTITY.md << 'ENDOFFILE'
+- **Name:** <NombreBot>
+- **Creature:** <Rol del bot, ej: Asistente de ventas>
+- **Vibe:** professional, efficient, friendly
+- **Emoji:** 🤖
+- **Language:** Spanish
+ENDOFFILE
+```
+
+---
+
+### PASO 4 — Configurar red y permisos en config.json ⚠️ CRÍTICO
+
+> ⚠️ **Sin este paso el bot fallará silenciosamente.** NullClaw bloquea el acceso a internet por defecto (sandbox). El bot intentará llamar a tu API y se quedará cargando 30 segundos sin responder.
+
+1. Abre el archivo de configuración:
+```bash
+nano ~/.nullhub/instances/nullclaw/<nombre-cliente>/config.json
+```
+
+2. Agrega o verifica estos tres bloques en el JSON raíz:
+```json
+"autonomy": {
+  "level": "autonomous"
+},
+"security": {
+  "sandbox": {
+    "enabled": false,
+    "backend": "auto"
+  }
+},
+"http_request": {
+  "enabled": true,
+  "max_response_size": 1000000,
+  "timeout_secs": 120,
+  "allowed_domains": ["*"]
+}
+```
+
+3. Guarda: `Ctrl+O` → `Enter` → `Ctrl+X`
+
+---
+
+### PASO 5 — Reiniciar el agente
+
+1. Ve al panel de NullHub en el navegador.
+2. Clic en el agente **`<nombre-cliente>`** en la barra lateral.
+3. Clic en **RESTART** (esquina superior derecha).
+
+✅ Esto aplica todos los cambios del SOUL.md, IDENTITY.md y config.json.
+
+---
+
+### PASO 6 — Prueba en Telegram ✅
+
+Escríbele a tu bot en Telegram:
+
+| Prueba | Respuesta esperada |
+|---|---|
+| `hola` | Saludo con personalidad configurada |
+| `<prueba de consulta>` | El bot llama al http_request y devuelve datos |
+| `<prueba de creación>` | El bot guía paso a paso |
+
+---
+
+### 🔍 Solución de Problemas (Agente Nuevo)
+
+| Síntoma | Causa | Solución |
+|---|---|---|
+| Bot no responde nada | Error de inicio | NullHub → agente → pestaña **LOGS** |
+| Tarda 30s y falla | Sandbox activo | Verifica `security.sandbox.enabled: false` en PASO 4 |
+| "No puedo acceder a internet" | http_request desactivado | Verifica `"http_request": { "enabled": true }` |
+| Responde genérico (ignora SOUL) | SOUL.md no se cargó | Verifica con `cat` y haz RESTART |
+| "No tengo información" | memory.db contaminada | `rm ~/.nullhub/instances/nullclaw/<nombre-cliente>/memory.db` → RESTART |
+
+---
+
+## 📂 PLANTILLA BASE — config.json y Archivos de Personalidad
+
+> Copia y pega estas plantillas para cada nuevo cliente. Reemplaza los valores en `MAYÚSCULAS` por los reales.
+
+### Plantilla `config.json` Completa
+
+```json
+{
+  "default_temperature": 0.7,
+  "models": {
+    "providers": {
+      "openai": {
+        "api_key": "TU_API_KEY_OPENAI"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "openai/gpt-4o-mini" },
+      "compact_context": false,
+      "max_tool_iterations": 75,
+      "max_history_messages": 50,
+      "parallel_tools": false,
+      "tool_dispatcher": "auto",
+      "session_idle_timeout_secs": 1800,
+      "status_show_emojis": true,
+      "message_timeout_secs": 120
+    },
+    "list": [
+      {
+        "id": "agente-NOMBRE_CLIENTE",
+        "workspace_path": "/nullclaw-data/workspace",
+        "model": { "primary": "openai/gpt-4o-mini" },
+        "temperature": 0.5,
+        "autonomy": {
+          "level": "autonomous",
+          "max_actions_per_hour": 120,
+          "require_approval_for_medium_risk": false
+        }
+      }
+    ]
+  },
+  "channels": {
+    "telegram": {
+      "accounts": {
+        "bot_principal": {
+          "bot_token": "TOKEN_BOT_TELEGRAM",
+          "agent_id": "agente-NOMBRE_CLIENTE",
+          "allow_from": ["*"]
+        }
+      }
+    }
+  },
+  "security": {
+    "sandbox": {
+      "enabled": false
+    }
+  },
+  "http_request": {
+    "enabled": true,
+    "max_response_size": 1000000,
+    "timeout_secs": 120,
+    "allowed_domains": ["*"]
+  }
+}
+```
+
+> ⚠️ **Campos que DEBES personalizar:** `api_key`, `agente-NOMBRE_CLIENTE` (en 2 lugares), `bot_token`.
+
+### Plantilla `IDENTITY.md`
+
+```markdown
+- **Name:** <NombreBot>
+- **Creature:** <Rol, ej: Asistente de ventas para restaurante>
+- **Vibe:** professional, friendly, concise
+- **Emoji:** 🤖
+- **Language:** Spanish
+```
+
+### Plantilla `SOUL.md`
+
+```markdown
+# <NombreBot> — Instrucciones
+
+Eres <NombreBot>, el asistente virtual para <NombreEmpresa>.
+
+## REGLA ABSOLUTA
+
+Para consultar o enviar datos, DEBES usar http_request:
+- URL: <URL_DEL_WEBHOOK_O_API>
+- Método: POST
+- Headers: {"Content-Type": "application/json"}
+
+NUNCA digas que no puedes hacer algo. SIEMPRE usa http_request.
+
+## Acciones disponibles
+
+- Consulta 1: {"action":"accion_1"}
+- Consulta 2: {"action":"accion_2", "param":"valor"}
+
+## Formato de respuesta
+
+- Siempre en español con emojis
+- Listas con guiones, no tablas
+- Máximo 5 resultados por respuesta
+```
+

@@ -155,6 +155,14 @@ nano /docker/agency/pizzeria/config.json
 
 Debe contener:
 ```json
+"autonomy": {
+  "level": "autonomous"
+},
+"security": {
+  "sandbox": {
+    "enabled": false
+  }
+},
 "http_request": {
   "enabled": true,
   "max_response_size": 1000000,

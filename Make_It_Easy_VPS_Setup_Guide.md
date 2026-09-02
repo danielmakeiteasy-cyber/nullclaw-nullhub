@@ -393,6 +393,11 @@ Pega este contenido completo (reemplaza `TU_API_KEY_OPENAI`, `TOKEN_BOT_TELEGRAM
       }
     }
   },
+  "security": {
+    "sandbox": {
+      "enabled": false
+    }
+  },
   "http_request": {
     "enabled": true,
     "max_response_size": 1000000,
