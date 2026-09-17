@@ -233,3 +233,74 @@ Luego presiona **RESTART** en NullHub. El bot arrancará con el historial en bla
 | El bot responde de forma genérica | `SOUL.md` vacío o con plantilla sin editar | Editar `SOUL.md` con instrucciones reales y hacer **RESTART** |
 | NullHub no carga (`502 Bad Gateway`) | Servicio detenido | `systemctl restart nullhub` |
 | Error `FORBIDDEN ORIGIN` al usar NullHub | Falta el bypass CORS en Nginx | Verificar que el archivo de Nginx de NullHub tiene los 3 `proxy_set_header` del bypass |
+| Loop `telegram issue: health check failed` en LOGS pese a token válido | Canal Telegram muerto **en memoria** (sin auto-recuperación en nullclaw v2026.5.29) | Reinicio real de la instancia → `nullhub api POST /api/instances/nullclaw/INSTANCIA/restart` |
+| Bot "running" en NullHub pero nadie responde mensajes | El proceso vive pero el canal dejó de escuchar hace días | Sonda `getUpdates` (ver lección 3 abajo): 200 = muerto → reiniciar; 409 = vivo |
+| Reinicié con `pkill` pero el problema sigue | `pkill -f "nullclaw.*INSTANCIA"` **no matchea** (el cmdline del proceso no contiene el nombre de la instancia) → el reinicio nunca ocurrió | Usar la API del hub (tabla de métodos abajo) |
+
+---
+
+## 🎓 Lecciones Aprendidas en Producción (2026-09-10, caso agente Daniel)
+
+> El agente Daniel estuvo **5.3 días sin recibir mensajes de Telegram** con el token VÁLIDO en
+> config y el proceso "running". Estas lecciones evitan repetirlo.
+
+### 📌 Lección 1 — Cómo reiniciar UN agente de verdad
+
+| Método | Veredicto |
+|---|---|
+| Botón **RESTART** del panel web | ✅ Correcto (usa la API) |
+| `nullhub restart / stop / start <comp>/<name>` | ❌ CLI 2026.4.17: *"not yet implemented"* |
+| `pkill -f "nullclaw.*INSTANCIA"` | ❌ No matchea: el cmdline es `nullclaw-vX.Y.Z gateway`, sin el nombre de la instancia |
+| `pkill nullclaw` | ⚠️ Funciona pero reinicia TODOS los bots del servidor |
+| `nullhub api POST /api/instances/nullclaw/INSTANCIA/restart` | ✅ **Recomendado por SSH** → responde `{"status":"started"}` |
+
+```bash
+# Verificar tras reiniciar (~10s):
+nullhub api GET /api/instances/nullclaw/INSTANCIA     # → "status":"running" + pid nuevo
+ss -tlnp | grep :3007                                  # puerto de la instancia escuchando
+```
+
+> [!NOTE]
+> Tras reiniciar por API, `/status` y `/doctor` pueden decir "Gateway unavailable" unos
+> minutos aunque todo esté bien. Confía en `/api/instances/...` y en el puerto.
+
+### 📌 Lección 2 — Un canal muerto no se recupera solo
+
+Síntoma: loop `warning(channel_manager): telegram issue: health check failed` en los logs,
+mientras el gateway responde `{"status":"ok"}` en `/health`. El canal murió en memoria y
+nullclaw no reintenta. **No hay fix gradual: reiniciar la instancia.**
+
+### 📌 Lección 3 — Prueba definitiva de que un bot de Telegram ESCUCHA
+
+Telegram solo permite **un** consumidor de `getUpdates` por bot. Aprovéchalo como detector:
+
+```bash
+TOKEN=$(python3 -c "import json;print(json.load(open('/root/.nullhub/instances/nullclaw/INSTANCIA/config.json'))['channels']['telegram']['accounts']['default']['bot_token'])")
+python3 -c "import urllib.request,urllib.error
+try: urllib.request.urlopen('https://api.telegram.org/bot$TOKEN/getUpdates?timeout=20',timeout=30); print('200: NADIE escucha → REINICIAR instancia')
+except urllib.error.HTTPError as e: print('409: el agente ESTÁ ESCUCHANDO ✅')"
+```
+
+Casos reales medidos con Daniel: la sonda recibió `409 Conflict: terminated by other
+getUpdates request` a los 35.6s y 8.6s → polling activo confirmado.
+
+### 📌 Lección 4 — Si el token es válido pero nada escucha, descarta competidores
+
+- **n8n**: un workflow **activo** con nodo `telegramTrigger` usando el mismo bot roba el
+  `getUpdates` (conflicto 409 permanente contra el agente). Verificar en la BD de n8n que
+  ningún workflow activo tenga ese trigger con la misma credencial.
+- **Docker Swarm viejo**: servicios migrados a NullHub pueden seguir vivos (réplicas 1/1)
+  con el mismo token. `docker service ls` → escala a 0 o elimina el servicio viejo.
+- **Webhook extraño**: `getWebhookInfo` con `url` no vacía = alguien apuntó el bot a otro
+  servidor. Limpia con `deleteWebhook`.
+
+### 📌 Lección 5 — Rutas útiles de la API de NullHub
+
+```bash
+nullhub routes --json                                          # catálogo completo de rutas
+nullhub api GET  /api/instances/nullclaw/INSTANCIA             # estado + pid
+nullhub api GET  /api/instances/nullclaw/INSTANCIA/channels    # canales configurados
+nullhub api GET  /api/instances/nullclaw/INSTANCIA/channels/telegram
+nullhub api GET  /api/instances/nullclaw/INSTANCIA/doctor
+nullhub api POST /api/instances/nullclaw/INSTANCIA/restart
+```

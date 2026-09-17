@@ -243,6 +243,86 @@ sleep 300 && curl -s http://127.0.0.1:5678/healthz
 
 ---
 
+### Problema 7: Editas un nodo del workflow pero n8n sigue ejecutando el código viejo
+
+**Cuándo ocurre:** parcheas un nodo (Code, Set, etc.) directamente en la base de datos o el
+workflow se comporta como si tus cambios no existieran, aunque el editor muestre el código nuevo.
+
+**Causa (n8n ≥ 2.x, verificado en 2.11.2):** con workflows **publicados**, el trigger ejecuta la
+**versión publicada** guardada en la tabla `workflow_history` (la que apunta
+`workflow_entity.activeVersionId`), NO el draft de `workflow_entity.nodes`. Si parcheas solo
+`workflow_entity`, la UI muestra tu cambio pero producción sigue corriendo el historial viejo.
+
+**Solución:** aplicar el parche en **AMBAS tablas** y luego reiniciar el contenedor:
+
+```bash
+# 1. Respaldar SIEMPRE antes de tocar la BD (los 3 archivos JUNTOS: sqlite + wal + shm)
+mkdir -p /root/n8n_backup_$(date +%Y%m%d) && cd /root/n8n_backup_$(date +%Y%m%d)
+cp /var/lib/docker/volumes/n8n-k4xc_n8n_data/_data/database.sqlite* .
+
+# 2. Actualizar el nodo en workflow_entity Y en la última fila de workflow_history
+#    de ese workflow (la apuntada por activeVersionId)
+
+# 3. Reiniciar y VERIFICAR CON UNA EJECUCIÓN REAL (no fiarse solo del editor)
+cd /docker/n8n-k4xc && docker compose restart
+```
+
+> [!IMPORTANT]
+> Al copiar la BD para inspeccionarla, lleva `database.sqlite` + `-wal` + `-shm` **juntos**.
+> Si copias solo el `.sqlite`, los cambios recientes viven en el WAL y verás datos viejos.
+
+### Problema 8: Eventos de Google Calendar fallan silenciosamente (crear/mover/eliminar)
+
+**Patrones de bug reales encontrados en producción (agente Daniel, 2026-09-10).** Sirven para
+cualquier workflow de calendario:
+
+**Bug 8a — Fin de evento que cruza medianoche:**
+```javascript
+// ❌ MAL: evento 23:30 → fin 00:30 DEL MISMO día → Google responde "Bad request"
+const fin = `${fecha}T${String((hora+1)%24).padStart(2,'0')}:30:00`;
+
+// ✅ BIEN: si la hora+1 pasa de 23:59, el fin rueda al DÍA SIGUIENTE
+const [h,m] = hora.split(':').map(Number);
+let finH=h, finM=m+30, diaSig=false;          // (o la duración que uses)
+if (finM>=60){finM-=60;finH++;}
+if (finH>=24){finH-=24;diaSig=true;}
+const fechaFin = diaSig ? sumarUnDia(fecha) : fecha;
+```
+
+**Bug 8b — Buscar evento solo por título cuando el agente envía `evento_id`:**
+```javascript
+// ❌ MAL: crash "undefined.toLowerCase" cuando el agente manda evento_id
+const ev = eventos.find(e => e.summary.toLowerCase() === body.titulo_evento.toLowerCase());
+
+// ✅ BIEN: match por evento_id primero, fallback a título, y error descriptivo si no hay match
+const ev = body.evento_id
+  ? eventos.find(e => e.id === body.evento_id)
+  : eventos.find(e => (e.summary||'').toLowerCase() === (body.titulo_evento||'').toLowerCase());
+if (!ev) return [{ json: { status:"error", mensaje:`Evento no encontrado: ${body.evento_id || body.titulo_evento}` } }];
+```
+
+**Bug 8c — `Get Many Events` con `query` vacío devuelve 0 resultados:**
+```javascript
+// ❌ MAL: query: {{ body.titulo_evento || '' }}  → string vacío → 0 eventos → rama muere en silencio
+// ✅ BIEN: quitar el parámetro query y filtrar en el Code node siguiente (patrón 8b)
+```
+
+> [!TIP]
+> **Contrato webhook recomendado para acciones de calendario:** identifica SIEMPRE los eventos
+> por `evento_id` (devuélvelo al crear y al consultar); el título queda como fallback humano.
+> `eliminar_evento{evento_id|titulo_evento}` · `mover_evento{evento_id, nueva_fecha, nueva_hora}`.
+
+**Cómo depurar ejecuciones fallidas en la BD (verificado):**
+
+```bash
+# El log de eventos por nodo (started/finished/failed, sin stack traces):
+/var/lib/docker/volumes/n8n-k4xc_n8n_data/_data/n8nEventLog.log
+
+# Ejecuciones: tabla execution_entity (estado) + execution_data (data = JSON "flattened":
+# strings numéricos como "0" son REFERENCIAS por índice a otros nodos, no valores literales.
+# Hay que des-referenciarlas recursivamente al leer).
+```
+
 ## 🔄 Procedimiento de Reset Completo
 
 Si nada funciona y quieres volver a cero (esto **borra todos los flujos y credenciales**):

@@ -1,0 +1,11 @@
+const fs = require('fs');
+const p = '/root/.nullhub/instances/nullclaw/Daniel/config.json';
+const mode = process.argv[2] || 'on';
+const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+c.models = c.models || {};
+c.models.providers = c.models.providers || {};
+c.models.providers.deepseek = c.models.providers.deepseek || {};
+if (mode === 'off') delete c.models.providers.deepseek.base_url;
+else c.models.providers.deepseek.base_url = 'http://127.0.0.1:9888';
+fs.writeFileSync(p, JSON.stringify(c, null, 2));
+console.log('base_url =>', c.models.providers.deepseek.base_url || '(none)');

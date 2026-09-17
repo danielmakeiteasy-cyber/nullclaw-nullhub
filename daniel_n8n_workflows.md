@@ -10,13 +10,22 @@ Telegram → Nullclaw (IA) → webhook POST /daniel/hub → n8n Switch por actio
 
 ---
 
-## Workflow: `WF-Daniel-Hub`
+## Workflow: `WF-Daniel-Asistente-Completo` ⚠️ ACTUALIZADO 2026-09-10
+
+> [!IMPORTANT]
+> **Estado real en producción (verificado 2026-09-10):** el workflow es
+> `WF-Daniel-Asistente-Completo` (id `2BT6BgWx27TSg64g`, cred Google OAuth
+> "CALENDARIO DANIEL PERSONAL"). Incluye la ruta `editar_evento` y los fixes de eventos
+> (fin de evento con cruce de medianoche + match por `evento_id`). Detalle completo en
+> `REVISION_EVENTOS_NULCLAW_2026-09-10.md`.
 
 ### Nodo 1: Webhook Trigger
 - **Tipo**: Webhook
 - **Method**: POST
 - **Path**: `daniel/hub`
-- **URL resultante**: `https://n8n-k4xc.srv1444305.hstgr.cloud/webhook/daniel/hub`
+- **URL resultante**: `https://n8n.makeiteasycol.com/webhook/daniel/hub`
+  ⚠️ La URL vieja `n8n-k4xc.srv1444305.hstgr.cloud` tiene certificado inválido (hostname
+  mismatch) — **no usar**. Si el `SOUL.md` del agente la menciona, reemplazarla.
 - **Response Mode**: Last Node
 
 ### Nodo 2: Switch (Enrutador)
@@ -34,6 +43,7 @@ Telegram → Nullclaw (IA) → webhook POST /daniel/hub → n8n Switch por actio
 | `consultar_disponibilidad` | → Nodo Calendar: List Events |
 | `agendar_evento` | → Nodo Calendar: Create Event |
 | `mover_evento` | → Nodo Calendar: Update Event |
+| `editar_evento` | → Nodo Calendar: Update Event (título) |
 | `eliminar_evento` | → Nodo Calendar: Delete Event |
 | `crear_tarea` | → Nodo Tareas: Agregar fila |
 | `listar_tareas` | → Nodo Tareas: Leer con filtro |
@@ -256,32 +266,72 @@ return [{
 ### 📅 RUTA: `agendar_evento`
 
 ```
-Switch → Google Calendar: Create Event → Respond
+Switch → Code "Prep Evento" → Google Calendar: Create Event → Respond
 ```
 
-**Google Calendar node**:
-- Operación: Create
-- Summary: `{{ $json.body.titulo }}`
-- Start: `{{ $json.body.fecha }}T{{ $json.body.hora_inicio }}:00`
-- End: `{{ $json.body.fecha }}T{{ $json.body.hora_fin || hora_inicio+1 }}:00`
-- Description: `{{ $json.body.descripcion }}`
-- Location: `{{ $json.body.ubicacion }}`
+**Contrato** (lo que envía el agente):
+```json
+{"action":"agendar_evento","titulo":"...","fecha":"YYYY-MM-DD","hora":"HH:MM","descripcion":"..."}
+```
+
+**Nodo Code "Prep Evento"** (fix 2026-09-10 — duración 1h con cruce de medianoche):
+```javascript
+const { titulo, fecha, hora, descripcion } = $json.body;
+const [h, m] = (hora || '09:00').split(':').map(Number);
+let finH = h + 1, fechaFin = fecha;           // duración fija de 1 hora
+if (finH >= 24) {                             // ⚠️ fix: 23:30 → 00:30 del DÍA SIGUIENTE
+  finH -= 24;
+  const d = new Date(fecha + 'T12:00:00');
+  d.setDate(d.getDate() + 1);
+  fechaFin = d.toISOString().slice(0, 10);
+}
+const pad = n => String(n).padStart(2, '0');
+return [{ json: {
+  summary: titulo,
+  start: { dateTime: `${fecha}T${pad(h)}:${pad(m)}:00`, timeZone: 'America/Bogota' },
+  end:   { dateTime: `${fechaFin}T${pad(finH)}:${pad(m)}:00`, timeZone: 'America/Bogota' },
+  description: descripcion || ''
+} }];
+```
+
+**Google Calendar node**: operación Create, mapeando `summary`, `start`, `end`, `description`
+desde el Code node (no desde el body crudo).
 
 ---
 
 ### 📅 RUTA: `mover_evento`
 
 ```
-Switch → Google Calendar: Get Many Events → Code (buscar por título) → Google Calendar: Update Event → Respond
+Switch → Google Calendar: Get Many Events (SIN query) → Code "Find Mover" → Google Calendar: Update Event → Respond
 ```
+
+**Contrato**: `{"action":"mover_evento","evento_id":"ID","nueva_fecha":"YYYY-MM-DD","nueva_hora":"HH:MM"}`
+(fallback: `titulo_evento`). Fix 2026-09-10: el Code busca por `evento_id` **primero** y por
+título como fallback; si no encuentra, responde error descriptivo. El nodo Get Many **no**
+lleva `query` (un query vacío devuelve 0 eventos y la rama muere en silencio).
+
+---
+
+### 📅 RUTA: `editar_evento`
+
+```
+Switch → Google Calendar: Get Many Events (SIN query) → Code "Find Editar" → Google Calendar: Update Event → Respond
+```
+
+**Contrato**: `{"action":"editar_evento","titulo_evento":"...","nuevo_titulo":"..."}`
+(mismo patrón de búsqueda que `mover_evento`).
 
 ---
 
 ### 📅 RUTA: `eliminar_evento`
 
 ```
-Switch → Google Calendar: Get Many Events → Code (buscar por título) → Google Calendar: Delete Event → Respond
+Switch → Google Calendar: Get Many Events (SIN query) → Code "Find Eliminar" → Google Calendar: Delete Event → Respond
 ```
+
+**Contrato**: `{"action":"eliminar_evento","evento_id":"ID"}` (fallback: `titulo_evento`).
+Fix 2026-09-10: match por `evento_id` primero, fallback por título, error descriptivo si no
+encuentra (antes crasheaba con `undefined.toLowerCase` cuando el agente enviaba `evento_id`).
 
 ---
 

@@ -268,10 +268,9 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
-```
 ```
 
 ### C. Activar sitios y obtener SSL:
@@ -459,7 +458,8 @@ Si todo está verde en los 3 puntos, **la agencia está 100% operativa** ✅
 | `https://hub.tudominio.com` da 502 | NullHub detenido | `systemctl restart nullhub` |
 | Error `FORBIDDEN ORIGIN` en NullHub | Falta bypass CORS en Nginx | Verifica que el archivo de Nginx tiene los 3 `proxy_set_header` del bypass |
 | NullHub arranca y se detiene solo | `state.json` corrupto | `mv ~/.nullhub/state.json ~/.nullhub/state.json.bak` y reinicia el servicio |
-| El bot no responde en Telegram | Token inválido o bot detenido | Revisa **LOGS** en NullHub; verifica el token en **CONFIG** |
+| El bot recibe mensajes pero no responde (aparece en History) | **Sandbox Mode activado** | Ir a CONFIG, buscar `sandbox_mode`, pasarlo a `false` y dar RESTART |
+| El bot no responde en Telegram (ni recibe) | Token inválido o bot detenido | Revisa **LOGS** en NullHub; verifica el token en **CONFIG** |
 | n8n no recibe el webhook del bot | URL incorrecta o workflow inactivo | Verifica la URL en `SOUL.md` y que el workflow esté **Active** en n8n |
 | `https://n8n.tudominio.com` da 502 | PM2 detenido | `pm2 restart n8n` |
 | Certbot falla con NXDOMAIN | DNS no propagado | Espera 5 min y verifica con `ping hub.tudominio.com` |
@@ -569,9 +569,17 @@ Si el bot ya tuvo conversaciones previas genéricas, la memoria contaminada apla
 # Limpiar memoria contaminada
 rm /root/.nullhub/instances/nullclaw/INSTANCIA/workspace/memory.db* && echo "Memoria limpia"
 
-# Reiniciar NullClaw (nullhub restart no está implementado aún)
-pkill nullclaw && echo "Reiniciando..."
-# NullHub detecta el proceso caído y lo levanta automáticamente en ~5 segundos
+# Reiniciar SOLO esta instancia (método correcto — verificado 2026-09-10)
+# NOTA: nullhub restart / stop / start por CLI responden "not yet implemented" (v2026.4.17)
+nullhub api POST /api/instances/nullclaw/INSTANCIA/restart
+# → debe responder {"status":"started"}
+
+# FALLBACK (escopeta — reinicia TODOS los bots del servidor, usar solo si la API falla):
+# pkill nullclaw && echo "Reiniciando..."
+# NullHub detecta los procesos caídos y los levanta automáticamente en ~5 segundos
+# ⚠️ NUNCA uses pkill -f "nullclaw.*INSTANCIA": el cmdline del proceso NO contiene
+#    el nombre de la instancia (es "/root/.nullhub/bin/nullclaw-vX.Y.Z gateway"), así que
+#    no matchea nada y el reinicio "parece" hecho pero no ocurre. Bug real detectado 2026-09-10.
 
 # Verificar que el proceso volvió
 pgrep -a nullclaw
@@ -597,6 +605,123 @@ $signature = "sha256=" + [BitConverter]::ToString($hash).Replace("-", "").ToLowe
 $headers = @{ "Content-Type" = "application/json"; "X-Hub-Signature-256" = $signature }
 Invoke-RestMethod -Uri "https://hub.tudominio.com/whatsapp" -Method Post -Headers $headers -Body $payload
 ```
+
+---
+
+## 🎓 Lecciones Aprendidas en Producción — Canal Telegram (2026-09-10, caso agente Daniel)
+
+> El agente Daniel estuvo **5.3 días sin recibir mensajes de Telegram** pese a tener un token
+> VÁLIDO en config. Diagnóstico y solución verificados en producción.
+
+### 📌 Lección 1 — El canal puede morir "en memoria" sin auto-recuperación
+
+**Síntoma:** el log de la instancia se llena de un loop infinito:
+```
+warning(channel_manager): telegram issue: health check failed
+```
+El gateway sigue respondiendo `{"status":"ok"}` en `/health` y NullHub muestra el agente como
+"running", pero **nadie está escuchando el bot** (0 mensajes procesados en el log).
+
+**Causa:** el canal Telegram murió en memoria (fallo transitorio en el arranque o durante la
+ejecución) y nullclaw **no reintenta la reconexión** (v2026.5.29). El proceso puede vivir así
+días o semanas.
+
+**Solución:** reinicio real de la instancia (ver Lección 2).
+
+### 📌 Lección 2 — Cómo reiniciar UN agente de verdad
+
+| Método | ¿Funciona? | Notas |
+|---|---|---|
+| Botón RESTART del panel web | ✅ | Llama a la API correcta |
+| `nullhub restart <comp>/<name>` | ❌ | CLI 2026.4.17 responde *"not yet implemented"* (igual `stop`/`start`) |
+| `pkill -f "nullclaw.*INSTANCIA"` | ❌ | **No matchea**: el cmdline no contiene el nombre de la instancia |
+| `pkill nullclaw` | ⚠️ | Funciona pero reinicia **TODOS** los bots del servidor |
+| **`nullhub api POST /api/instances/nullclaw/INSTANCIA/restart`** | ✅ **Recomendado** | Quirúrgico: solo esa instancia |
+
+### 📌 Lección 3 — Checklist cuando el bot de Telegram no responde
+
+```bash
+INSTANCIA="Daniel"   # ajusta
+TOKEN=$(python3 -c "import json;print(json.load(open('/root/.nullhub/instances/nullclaw/$INSTANCIA/config.json'))['channels']['telegram']['accounts']['default']['bot_token'])")
+
+# 1. ¿El token es válido? → debe devolver ok:true y el username del bot
+python3 -c "import urllib.request,json;d=json.load(urllib.request.urlopen('https://api.telegram.org/bot$TOKEN/getMe'));print(d['ok'],d['result']['username'])"
+
+# 2. ¿El webhook está limpio? → url vacía = long-polling correcto; url extraña = alguien secuestró el bot
+python3 -c "import urllib.request,json;print(json.load(urllib.request.urlopen('https://api.telegram.org/bot$TOKEN/getWebhookInfo'))['result'])"
+
+# 3. ¿Hay ALGUIEN escuchando? → long-poll de 20s:
+#    HTTP 409 "terminated by other getUpdates request" = ✅ el agente está polleando (prueba definitiva)
+#    HTTP 200 sin conflicto = ❌ nadie escucha → reiniciar la instancia
+python3 -c "import urllib.request,urllib.error,time;t=time.time()
+try: urllib.request.urlopen('https://api.telegram.org/bot$TOKEN/getUpdates?timeout=20',timeout=30); print('200: NADIE escucha → REINICIAR')
+except urllib.error.HTTPError as e: print(e.code, e.read().decode()[:80], '→ bot VIVO')"
+
+# 4. ¿Compiten otros consumidores por el mismo token?
+docker service ls                        # servicios swarm viejos con réplicas >0 usando el mismo bot
+# y en n8n: un workflow ACTIVO con nodo telegramTrigger roba el getUpdates (conflicto 409 permanente)
+```
+
+> [!IMPORTANT]
+> La sonda del paso 3 es la **prueba definitiva**: Telegram solo permite UN consumidor de
+> `getUpdates` por bot. Si tu sonda recibe 409, el agente está escuchando; si recibe 200,
+> está muerto. Verificado con el agente Daniel (409 a los 35s y 8s tras el fix).
+
+### 📌 Lección 4 — Estado del hub tras reiniciar por API
+
+Tras `nullhub api POST .../restart`, el endpoint `/status` y `/doctor` pueden mostrar
+`"Gateway unavailable"` durante un rato aunque el proceso ya escuche en su puerto. No es un
+error: usa `nullhub api GET /api/instances/nullclaw/INSTANCIA` (muestra `pid` y `status`)
+o comprueba el puerto directamente: `ss -tlnp | grep :3007`.
+
+### 📌 Lección 5 — Hub colgado = 504 en TODO el panel (2026-09-14, caso Daniel)
+
+**Síntoma:** `https://hub.tudominio.com/instances/nullclaw/Daniel` devuelve
+`504 Gateway Time-out (nginx/1.24.0)` y el panel muestra errores de `/api/status`
+y `/api/components`. Los webhooks que pasan por el hub también dejan de responder.
+
+**Causa raíz:** el proceso `nullhub` (systemd lo sigue viendo `active`) queda
+**colgado sin aceptar conexiones**. Un hijo `nullclaw --probe-provider-health
+--timeout-secs 10` (sonda de DeepSeek) llevaba 8+ minutos vivo sin honrar su
+timeout, bloqueando el event loop del hub. Bug presente en v2026.5.29.
+
+**Diagnóstico (2 comandos):**
+```bash
+# 1. Cola de accept LLENA (Recv-Q > 0, p.ej. 129/128) = hub no acepta conexiones
+ss -tlnp | grep 19800
+# 2. El /health local no responde pese a systemctl is-active = nullhub colgado
+curl -s -m 5 http://127.0.0.1:19800/health   # (vacío = colgado)
+# Extra: ver hijos atascados -> ps -o pid,etime,cmd --ppid $(pgrep -f 'nullhub serve')
+```
+
+**Solución verificada:** `systemctl restart nullhub` (~25s en levantar las 3
+instancias). Luego validar: health `{"status":"ok"}`, página pública HTTP 200,
+instancia running con `nullhub api GET /api/instances/nullclaw/Daniel`, y sonda
+409 de Telegram (Lección 3) para confirmar que el bot vuelve a escuchar.
+
+**Prevención (2026-09-14):** la sonda `--probe-provider-health` no honra
+`--timeout-secs` (v2026.5.29 = última disponible, sin fix upstream aún).
+✅ **Watchdog INSTALADO y probado end-to-end:**
+
+- Script: `/usr/local/bin/nullhub_watchdog.sh` — hace `curl -sf -m 5` a
+  `http://127.0.0.1:19800/health`; si falla → `systemctl restart nullhub`.
+  Incluye: cooldown de 300s (stamp en `/run/nullhub_watchdog.stamp`),
+  `flock` anti-carrera (`/run/nullhub_watchdog.lock`), polling post-restart
+  hasta 90s en pasos de 5s (un proceso SIGSTOP/frizado tarda en morir:
+  systemd espera antes del SIGKILL), y rotación de log si supera 1MB.
+- Cron: `/etc/cron.d/nullhub-watchdog` → `*/2 * * * * root ...` (cada 2 min).
+  Con cooldown, el peor caso de detección+recuperación es ~7 minutos.
+- Log: `/var/log/nullhub_watchdog.log` (buscar `HEALTH_FAIL` / `RESTART_OK`).
+- **Test de validación:** `kill -STOP $(systemctl show -p MainPID --value nullhub)`
+  simula el cuelgue exacto (systemd sigue en `active`, health no responde);
+  el watchdog detectó, reinició y reportó `RESTART_OK health responde (8x5s)`.
+
+Notas de arranque tras reinicio del VPS (verificado 2026-09-14): `nullhub`,
+`nginx` y `cron` están `enabled`; Docker arranca vía `docker.socket` (enabled)
+y los servicios Swarm (easypanel, n8n en 5678 vía docker-proxy) se re-levantan
+solos; PM2 tiene `pm2-root.service` + `dump.pm2` (aunque n8n ya no corre en
+PM2 sino en Docker). Contenedores swarm `agency_daniel` y
+`seguridad_nullhub-proxy` están en 0/0 réplicas (parados, sin conflicto).
 
 **PASO 7 — El Access Token Expira Cada 24 Horas (Modo Prueba)**
 
@@ -826,7 +951,7 @@ Escríbele a tu bot en Telegram:
 
 > Copia y pega estas plantillas para cada nuevo cliente. Reemplaza los valores en `MAYÚSCULAS` por los reales.
 
-### Plantilla `config.json` Completa
+### Plantilla `config.json` Completa — Variante OpenAI
 
 ```json
 {
@@ -891,6 +1016,75 @@ Escríbele a tu bot en Telegram:
 
 > ⚠️ **Campos que DEBES personalizar:** `api_key`, `agente-NOMBRE_CLIENTE` (en 2 lugares), `bot_token`.
 
+### Plantilla `config.json` Completa — Variante DeepSeek
+
+Usa esta variante si prefieres DeepSeek sobre OpenAI (más económico, muy buena calidad).
+Solo cambia `providers` y el `primary` del modelo:
+
+```json
+{
+  "default_temperature": 0.7,
+  "models": {
+    "providers": {
+      "deepseek": {
+        "api_key": "TU_API_KEY_DEEPSEEK"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "deepseek/deepseek-chat" },
+      "compact_context": false,
+      "max_tool_iterations": 75,
+      "max_history_messages": 50,
+      "parallel_tools": false,
+      "tool_dispatcher": "auto",
+      "session_idle_timeout_secs": 1800,
+      "status_show_emojis": true,
+      "message_timeout_secs": 120
+    },
+    "list": [
+      {
+        "id": "agente-NOMBRE_CLIENTE",
+        "workspace_path": "/nullclaw-data/workspace",
+        "model": { "primary": "deepseek/deepseek-chat" },
+        "temperature": 0.5,
+        "autonomy": {
+          "level": "autonomous",
+          "max_actions_per_hour": 120,
+          "require_approval_for_medium_risk": false
+        }
+      }
+    ]
+  },
+  "channels": {
+    "telegram": {
+      "accounts": {
+        "bot_principal": {
+          "bot_token": "TOKEN_BOT_TELEGRAM",
+          "agent_id": "agente-NOMBRE_CLIENTE",
+          "allow_from": ["*"]
+        }
+      }
+    }
+  },
+  "security": {
+    "sandbox": {
+      "enabled": false
+    }
+  },
+  "http_request": {
+    "enabled": true,
+    "max_response_size": 1000000,
+    "timeout_secs": 120,
+    "allowed_domains": ["*"]
+  }
+}
+```
+
+> ⚠️ **Campos que DEBES personalizar:** `api_key`, `agente-NOMBRE_CLIENTE` (en 2 lugares), `bot_token`.
+> 💡 **Modelos DeepSeek disponibles:** `deepseek/deepseek-chat` (general, económico) · `deepseek/deepseek-reasoner` (razonamiento complejo, más caro)
+
 ### Plantilla `IDENTITY.md`
 
 ```markdown
@@ -929,3 +1123,75 @@ NUNCA digas que no puedes hacer algo. SIEMPRE usa http_request.
 - Máximo 5 resultados por respuesta
 ```
 
+---
+
+## Leccion (2026-09-15) — Google Calendar getAll en n8n 2.x: timeMin/timeMax van a NIVEL RAIZ del nodo, NO dentro de options
+
+> **Sintoma:** `consultar_disponibilidad` devolvía siempre los mismos eventos de la próxima semana sin importar la `fecha` consultada (ej: preguntaba por 2026-10-18 y devolvía un evento del 2026-09-16). La CREACIÓN de eventos funcionaba perfecto — solo la CONSULTA estaba rota.
+
+**Causa raíz:** En n8n 2.11.2, el nodo `googleCalendar` (typeVersion 1.3) ejecuta la implementación declarativa nueva donde `timeMin` y `timeMax` son **parámetros top-level con valores por defecto**:
+- `timeMin` por defecto = `={{ $now }}` (ahora)
+- `timeMax` por defecto = `={{ $now.plus({ week: 1 }) }}` (ahora + 7 días)
+
+Al tener `timeMin`/`timeMax` anidados dentro de `options`, n8n aplicaba los DEFAULTS (ventana fija de 7 días desde ahora) e ignoraba los valores de `options` → cualquier fecha fuera de esa ventana devolvía basura o vacío.
+
+**Fix aplicado** (workflow `2BT6BgWx27TSg64g`, nodo `Get Calendar Disp`):
+
+```json
+"parameters": {
+  "operation": "getAll",
+  "calendar": {"__rl": true, "mode": "list", "value": "primary"},
+  "limit": 20,
+  "timeMin": "={{ $json.body.fecha }}T00:00:00-05:00",
+  "timeMax": "={{ $json.body.fecha }}T23:59:59-05:00",
+  "options": {"singleEvents": true, "orderBy": "startTime"}
+}
+```
+
+**Diagnóstico que lo confirmó:**
+1. Probar con `timeMin`/`timeMax` ESTÁTICOS dentro de `options` → seguía sin filtrar (descarta problema de expresiones).
+2. Leer el schema del nodo en el contenedor: `dist/node-definitions/nodes/n8n-nodes-base/googleCalendar/v1/resource_event/operation_get_all.ts` → muestra `timeMin`/`timeMax` top-level con `@default ={{ $now }}`.
+
+**Limpieza realizada el mismo día:**
+- Eliminado 1 duplicado de "Cita ortopedia Ari" (18-oct 11:00, quedó 1 solo).
+- Eliminados eventos de prueba: TEST-PERSIST-16SEP, TEST-CORTE-2026-09-25, TEST-CORTE-2026-10-05.
+
+**Nota:** La app de Google Cloud ya está en producción (tokens OAuth ya no caducan en 7 días).
+
+---
+
+## Leccion (2026-09-15 tarde) — Bot Daniel no respondia: canal Telegram con error TlsInitialization + cron reporte roto
+
+> **Sintoma 1:** El usuario pedia crear un evento y el bot no respondia. n8n NO tenia ejecuciones nuevas (el mensaje nunca llego). El cerebro (LLM) si funcionaba (llm_token_usage.jsonl con success:true).
+
+**Causa:** El proceso del bot acumulaba `warning(channel_loop): Telegram poll error: error.TlsInitialization` en stdout.log — el loop de polling de Telegram quedo en mal estado y no recibia mensajes. Telegram era alcanzable desde el VPS (fetch HTTP 200), el problema era interno del runtime.
+
+**Fix:** `nullhub api POST /api/instances/nullclaw/Daniel/restart` (el CLI `nullhub restart` aun no esta implementado). Tras reiniciar: 0 errores nuevos y arranque limpio. VibrandBot tenia el mismo patron (70 errores acumulados) y tambien fue reiniciado — arranque con "telegram polling thread started".
+
+**Como detectarlo rapido:** si el bot no responde, verificar (1) ejecuciones recientes en n8n (`execution_entity order by startedAt desc`) y (2) `grep -c TlsInitialization .../logs/stdout.log` + comparar tamano del log esperando 30s. Si crece -> reiniciar via API.
+
+> **Sintoma 2:** Cron reporte lunes 7AM fallaba con `Sheet with ID Movimientos not found`.
+
+**Causa:** El nodo `Cron Read Movimientos` tenia `sheetName.value = "Movimientos"` (texto) cuando el formato correcto (usado por los otros 7 nodos de la misma hoja) es `value: "gid=0"`.
+
+**Fix:** Editar el workflow: sheetName -> `{"__rl": true, "mode": "list", "value": "gid=0", "cachedResultName": "Movimientos"}`. Verificado con `consultar_balance` (lee la misma hoja OK).
+
+**Nota:** `generar_reporte` por webhook devuelve cuerpo vacio cuando las hojas no tienen filas (los nodos de lectura devuelven 0 items y el Respond con allIncomingItems responde vacio). No es error — es falta de datos.
+
+---
+
+## Leccion (2026-09-16) - Bot Daniel sin responder: token de Telegram REVOCADO (401)
+
+Sintoma: el usuario pedia crear eventos y el bot no respondia. n8n sin ejecuciones nuevas, cerebro (LLM) sin llamadas. Log acumulaba `telegram issue: health check failed` (119+) y errores `TlsInitialization`.
+
+Causa raiz: el `bot_token` de @DanielRang_bot estaba revocado - Telegram respondia `401 Unauthorized` al getMe. El proceso del bot vivia pero su canal Telegram no recibia NADA.
+
+Diagnostico clave: probar el token directo contra Telegram desde el VPS (getMe -> 401).
+
+Fix:
+1. Usuario regenera el token en @BotFather (/mybots -> API Token -> Revoke).
+2. Actualizar token en DOS lugares: `instances/nullclaw/Daniel/config.json` (channels.telegram.accounts.default.bot_token) y `/root/.nullhub/state.json` (cache del hub).
+3. `nullhub api POST /api/instances/nullclaw/Daniel/restart`.
+4. Verificar: "telegram polling thread started" en stdout.log, 0 errores nuevos en 60s.
+
+Nota: la cita de ortopedia de Ari (18-oct 11am) SI estaba creada en Google Calendar todo el tiempo - el usuario pensaba que no porque el bot no podia responder.

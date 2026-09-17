@@ -1,0 +1,23 @@
+# Credenciales - NO subir
+VPS_Credentials.md
+n8n_calendar_creds.txt
+n8n_cal_cred_status.txt
+
+# Logs y dumps de depuracion
+action_results.txt
+daniel_check.txt
+daniel_restart.txt
+daniel_setup_results.txt
+exec_*.json
+full_ex_*.json
+last_n8n_error.json
+n8n_check.txt
+n8n_cred_*.txt
+n8n_test_results.txt
+n8n_types.txt
+node_errors.txt
+out.txt
+recent_executions.json
+ssh_output.txt
+vps_status.txt
+wf_dump*.json
